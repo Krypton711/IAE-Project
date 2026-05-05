@@ -92,31 +92,24 @@ void benchmark_graph(const std::string& path, CSVWriter& csv, bool run_naive, bo
                       true_diam, true_diam, naive_res.num_bfs, t);
     }
 
-    // ── k-BFS (multiple k values, multiple strategies) ──────────────
+    // ── k-BFS (two-phase: S random → S' = k farthest from S) ──────────
+    // As per paper: Phase 1 picks k random sources S, Phase 2 picks S' = k vertices
+    // with largest d(v,S). ê(v) = max(d(v,S), d(v,S')). No strategy enum needed.
     std::vector<int> k_values = {1, 3, 5, 10, 20};
-    std::vector<std::pair<KBFSStrategy, std::string>> strategies = {
-        {KBFSStrategy::RANDOM,      "random"},
-        {KBFSStrategy::HIGH_DEGREE, "high_degree"},
-        {KBFSStrategy::ITERATIVE,   "iterative"},
-    };
 
-    for (auto& [strat, strat_name] : strategies) {
-        for (int k : k_values) {
-            if (k > g.n) continue;
-            if (verbose) std::cout << "  Running k-BFS (k=" << k
-                                   << ", " << strat_name << ")...\n";
-            timer.begin();
-            auto kbfs_res = kbfs_diameter(g, k, strat);
-            double t = timer.elapsed_ms();
-            if (verbose) std::cout << "    Diameter LB = " << kbfs_res.diameter_lower
-                                   << "  UB = " << kbfs_res.diameter_upper
-                                   << "  BFS = " << kbfs_res.num_bfs
-                                   << "  Time = " << t << " ms\n";
-            csv.write_row(name, g.n, g.m, "k-BFS",
-                          std::to_string(k), strat_name,
-                          kbfs_res.diameter_lower, true_diam,
-                          kbfs_res.num_bfs, t);
-        }
+    for (int k : k_values) {
+        if (k > g.n) continue;
+        if (verbose) std::cout << "  Running k-BFS (k=" << k << ")...\n";
+        timer.begin();
+        auto kbfs_res = kbfs_diameter(g, k);
+        double t = timer.elapsed_ms();
+        if (verbose) std::cout << "    Diameter estimate = " << kbfs_res.diameter_estimate
+                               << "  BFS = " << kbfs_res.num_bfs
+                               << "  Time = " << t << " ms\n";
+        csv.write_row(name, g.n, g.m, "k-BFS",
+                      std::to_string(k), "-",
+                      kbfs_res.diameter_estimate, true_diam,
+                      kbfs_res.num_bfs, t);
     }
 
     // ── RV algorithm ────────────────────────────────────────────────
@@ -152,21 +145,18 @@ bool run_verification() {
         }
         std::cout << "  Naive: OK (diameter = " << naive_res.diameter << ")\n";
 
-        // k-BFS: lower bound should <= true, upper bound >= true
+        // k-BFS: estimate should be <= true diameter (it's a lower-bound estimator)
+        // and >= 1 (or > 0 for any non-trivial graph)
         for (int k : {1, 3, 5}) {
-            auto kbfs_res = kbfs_diameter(g, k, KBFSStrategy::ITERATIVE);
-            if (kbfs_res.diameter_lower > expected_diam) {
-                std::cout << "  FAIL: k-BFS(k=" << k << ") lower bound "
-                          << kbfs_res.diameter_lower << " > true " << expected_diam << "\n";
+            if (k > g.n) continue;
+            auto kbfs_res = kbfs_diameter(g, k);
+            if (kbfs_res.diameter_estimate > expected_diam) {
+                std::cout << "  FAIL: k-BFS(k=" << k << ") estimate "
+                          << kbfs_res.diameter_estimate << " > true " << expected_diam << "\n";
                 all_ok = false;
             }
-            if (kbfs_res.diameter_upper < expected_diam) {
-                std::cout << "  FAIL: k-BFS(k=" << k << ") upper bound "
-                          << kbfs_res.diameter_upper << " < true " << expected_diam << "\n";
-                all_ok = false;
-            }
-            std::cout << "  k-BFS(k=" << k << "): LB=" << kbfs_res.diameter_lower
-                      << " UB=" << kbfs_res.diameter_upper << " OK\n";
+            std::cout << "  k-BFS(k=" << k << "): estimate=" << kbfs_res.diameter_estimate
+                      << " (true=" << expected_diam << ") OK\n";
         }
 
         // RV: estimate >= ceil(2D/3)

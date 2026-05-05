@@ -3,104 +3,214 @@
 #include "graph.hpp"
 #include <random>
 #include <cmath>
-#include <set>
 #include <algorithm>
+#include <numeric>
+#include <limits>
+#include <unordered_map>
+#include <unordered_set>
 
 /**
- * RV Algorithm (Roditty-Vassilevska Williams, STOC 2013)
+ * RV Eccentricity Estimation Algorithm
+ * Roditty and Vassilevska Williams, STOC 2013.
+ * As described (and implemented) in: "Parallel Algorithms for Eccentricity Computation" (Shun et al.)
  *
- * 3/2-approximation of the diameter for undirected unweighted graphs.
+ * Guarantee: max(R, (2/3)*e(v)) <= ê(v) <= min(D, (3/2)*e(v))  w.h.p.
  *
  * Algorithm:
- * 1. Sample a random set S of ceil(sqrt(n)) vertices.
- * 2. Run BFS from every vertex in S. Compute ecc(s) for each s in S.
- * 3. For each vertex v, find w(v) = argmax_{s in S} d(v, s).
- * 4. Collect the set W = { w(v) : v in V } of distinct "witness" vertices.
- * 5. Run BFS from each vertex in W. Compute ecc(w) for each w in W.
+ * 1. Set s = ceil(sqrt(n * ln(n))) (the "ball size").
+ *    Sample |S| = ceil(n/s * ln(n)) = Θ(sqrt(n/ln(n))) random vertices → set S.
+ *
+ * 2. BFS from each vertex in S.
+ *    This gives d(v, q) for all v, q∈S.
+ *    Compute:
+ *      pS(v)  = argmin_{q∈S} d(v, q)   (closest sample to v)
+ *      e(q)   for each q ∈ S           (exact eccentricities via BFS)
+ *      max_{q∈S} d(v,q)                for all v
+ *
+ * 3. Find w = argmax_v d(v, pS(v))  (vertex farthest from its closest sample).
+ *
+ * 4. BFS from w.
+ *    During this BFS:
+ *      - Collect Ns(w) = s closest vertices to w (by BFS order = distance from w).
+ *      - For each vertex v outside Ns(w), record vt = the first vertex of Ns(w)
+ *        encountered on the BFS path from w to v (i.e., the ancestor of v in the
+ *        BFS tree that is in Ns(w)).
+ *      - Record d(v, w) for all v.
+ *
+ * 5. BFS from each vertex in Ns(w). Compute e(u) for each u ∈ Ns(w).
+ *
  * 6. For each vertex v:
- *      ecc_hat(v) = max( max_{s in S} d(v, s),  ecc(w(v)) )
- * 7. Diameter estimate = max_v ecc_hat(v).
+ *    - If v ∈ S ∪ Ns(w): eccentricity already known exactly.
+ *    - Else:
+ *        e'(v) = max(max_{q∈S} d(v,q), d(v,w))
+ *        if d(v, vt) <= d(vt, w):
+ *            ê(v) = max(e'(v), e(vt))
+ *        else:
+ *            ê(v) = max(e'(v), min_{q∈S} e(q))
  *
- * Guarantee: ceil(2D/3) <= D_hat <= D
- *
- * Time: O(|S| * (n + m) + |W| * (n + m))  ~  O(sqrt(n) * m) expected
+ * 7. Diameter estimate = max_v ê(v).
  */
 
 struct RVResult {
-    int diameter_estimate;   // estimated diameter
-    int num_bfs;             // total BFS calls performed
-    std::vector<int> ecc_hat; // per-vertex eccentricity estimate
+    int diameter_estimate;      // estimated diameter
+    int num_bfs;                // total BFS calls
+    std::vector<int> ecc_hat;  // ê(v) for each vertex
 };
 
 inline RVResult rv_diameter(const Graph& g, unsigned seed = 42) {
     RVResult res;
-    res.ecc_hat.assign(g.n, 0);
+    int n = g.n;
+    res.ecc_hat.assign(n, 0);
     res.num_bfs = 0;
 
     std::mt19937 rng(seed);
 
-    int sample_size = std::max(1, (int)std::ceil(std::sqrt(g.n)));
+    // ── Step 1: Compute parameters and sample S ──────────────────────
+    double log_n = std::log(std::max(2, n));
+    int s = std::max(1, (int)std::ceil(std::sqrt((double)n * log_n)));
+    int S_size = std::max(1, (int)std::ceil((double)n / s * log_n));
+    S_size = std::min(S_size, n);
 
-    // Step 1: Sample S
-    std::vector<int> perm(g.n);
+    std::vector<int> perm(n);
     std::iota(perm.begin(), perm.end(), 0);
     std::shuffle(perm.begin(), perm.end(), rng);
 
-    std::vector<int> S(perm.begin(), perm.begin() + sample_size);
+    std::vector<int> S(perm.begin(), perm.begin() + S_size);
+    std::unordered_set<int> S_set(S.begin(), S.end());
 
-    // Step 2: BFS from each s in S, compute ecc(s) and distances
-    // Store all distance arrays for S
-    std::vector<std::vector<int>> dist_S(sample_size);
-    std::vector<int> ecc_S(sample_size, 0);
+    // ── Step 2: BFS from each vertex in S ────────────────────────────
+    // maxDistToS[v] = max_{q∈S} d(v, q)
+    // closestInS[v] = index of pS(v) in S (closest sample to v)
+    // closestDistToS[v] = d(v, pS(v))
+    // ecc_S[i] = eccentricity of S[i]
+    std::vector<int> maxDistToS(n, 0);
+    std::vector<int> closestInS(n, 0);
+    std::vector<int> closestDistToS(n, std::numeric_limits<int>::max());
+    std::vector<int> ecc_S(S_size, 0);
 
-    for (int i = 0; i < sample_size; i++) {
+    // Store all dist arrays for S (needed for ê(v) computation)
+    std::vector<std::vector<int>> dist_S(S_size);
+
+    for (int i = 0; i < S_size; i++) {
         dist_S[i] = g.bfs(S[i]);
         res.num_bfs++;
-        for (int v = 0; v < g.n; v++) {
-            ecc_S[i] = std::max(ecc_S[i], dist_S[i][v]);
-        }
-    }
-
-    // Step 3: For each vertex v, find w(v) = argmax_{s in S} d(v, s)
-    // Also compute max_{s in S} d(v, s) for the estimate
-    std::vector<int> w(g.n);       // w[v] = index in S (not S[index])
-    std::vector<int> max_d_S(g.n, 0); // max distance from v to any s in S
-
-    for (int v = 0; v < g.n; v++) {
-        int best_idx = 0;
-        int best_dist = dist_S[0][v];
-        for (int i = 1; i < sample_size; i++) {
-            if (dist_S[i][v] > best_dist) {
-                best_dist = dist_S[i][v];
-                best_idx = i;
+        for (int v = 0; v < n; v++) {
+            int d = dist_S[i][v];
+            if (d < 0) continue;
+            ecc_S[i] = std::max(ecc_S[i], d);
+            if (d > maxDistToS[v]) maxDistToS[v] = d;
+            if (d < closestDistToS[v]) {
+                closestDistToS[v] = d;
+                closestInS[v] = i;
             }
         }
-        w[v] = S[best_idx]; // actual vertex ID of w(v)
-        max_d_S[v] = best_dist;
     }
 
-    // Step 4: Collect distinct witness vertices W = { w(v) : v in V }
-    std::set<int> W_set(w.begin(), w.end());
-    std::vector<int> W(W_set.begin(), W_set.end());
+    int minEccS = *std::min_element(ecc_S.begin(), ecc_S.end());
 
-    // Step 5: BFS from each vertex in W, compute ecc(w)
-    std::unordered_map<int, int> ecc_W; // vertex -> eccentricity
-    for (int ww : W) {
-        auto dist = g.bfs(ww);
-        res.num_bfs++;
-        int ecc = 0;
-        for (int v = 0; v < g.n; v++) {
-            ecc = std::max(ecc, dist[v]);
+    // Mark eccentricities for vertices in S
+    for (int i = 0; i < S_size; i++) {
+        res.ecc_hat[S[i]] = ecc_S[i];
+    }
+
+    // ── Step 3: Find w = argmax_v d(v, pS(v)) ───────────────────────
+    int w = 0;
+    int w_dist = -1;
+    for (int v = 0; v < n; v++) {
+        if (closestDistToS[v] > w_dist) {
+            w_dist = closestDistToS[v];
+            w = v;
         }
-        ecc_W[ww] = ecc;
     }
 
-    // Step 6: Compute ecc_hat(v) for each v
-    for (int v = 0; v < g.n; v++) {
-        res.ecc_hat[v] = std::max(max_d_S[v], ecc_W[w[v]]);
+    // ── Step 4: Modified BFS from w ──────────────────────────────────
+    // Collect Ns(w) = first s vertices visited (in BFS order from w).
+    // For each v outside Ns(w), record vt = ancestor in Ns(w) on path from w to v.
+    std::vector<int> dist_w(n, -1);
+    std::vector<int> parent_w(n, -1);  // BFS parent
+    std::vector<int> Ns_w;             // s closest vertices to w (BFS order)
+    std::unordered_set<int> Ns_w_set;
+    // vt[v] = closest ancestor of v (in BFS tree) that lies in Ns(w)
+    std::vector<int> vt(n, -1);
+
+    {
+        std::queue<int> q;
+        dist_w[w] = 0;
+        parent_w[w] = w;
+        q.push(w);
+        Ns_w.push_back(w);
+        Ns_w_set.insert(w);
+        vt[w] = w;  // w is its own vt
+
+        while (!q.empty()) {
+            int u = q.front(); q.pop();
+            for (int nb : g.adj[u]) {
+                if (dist_w[nb] == -1) {
+                    dist_w[nb] = dist_w[u] + 1;
+                    parent_w[nb] = u;
+                    // vt[nb] = vt[u] if u has a vt already in Ns(w)
+                    if ((int)Ns_w.size() < s) {
+                        // nb itself is being added to Ns(w)
+                        Ns_w.push_back(nb);
+                        Ns_w_set.insert(nb);
+                        vt[nb] = nb;
+                    } else {
+                        vt[nb] = vt[u];
+                    }
+                    q.push(nb);
+                }
+            }
+        }
+        res.num_bfs++;
     }
 
-    // Step 7: Diameter estimate
+    // Eccentricity of w itself
+    {
+        int ecc_w = 0;
+        for (int v = 0; v < n; v++)
+            if (dist_w[v] >= 0) ecc_w = std::max(ecc_w, dist_w[v]);
+        res.ecc_hat[w] = ecc_w;
+        if (S_set.count(w)) {
+            // already set from S BFS; keep whichever
+        }
+    }
+
+    // ── Step 5: BFS from each vertex in Ns(w) ────────────────────────
+    std::unordered_map<int, int> ecc_Ns_w;   // vertex -> eccentricity
+    std::unordered_map<int, std::vector<int>> dist_Ns_w; // dist arrays for Ns(w)
+    for (int u : Ns_w) {
+        auto dist_u = g.bfs(u);
+        res.num_bfs++;
+        int ecc_u = 0;
+        for (int v = 0; v < n; v++)
+            if (dist_u[v] >= 0) ecc_u = std::max(ecc_u, dist_u[v]);
+        ecc_Ns_w[u] = ecc_u;
+        res.ecc_hat[u] = ecc_u; // exact eccentricity for vertices in Ns(w)
+        dist_Ns_w[u] = std::move(dist_u);
+    }
+
+    // Also exact for vertices in S (already computed above)
+
+    // ── Step 6: Compute ê(v) for v ∉ S ∪ Ns(w) ──────────────────────
+    for (int v = 0; v < n; v++) {
+        if (S_set.count(v) || Ns_w_set.count(v)) continue;  // already have exact ecc
+
+        int e_prime = std::max(maxDistToS[v], dist_w[v] >= 0 ? dist_w[v] : 0);
+
+        int vt_v = vt[v];              // closest vertex in Ns(w) on path from w to v
+        int d_v_vt = (vt_v >= 0 && dist_Ns_w.count(vt_v)) ? dist_Ns_w.at(vt_v)[v] : -1;
+        int d_vt_w = (vt_v >= 0) ? dist_w[vt_v] : -1;
+
+        int ecc_hat_v;
+        if (vt_v >= 0 && d_v_vt >= 0 && d_vt_w >= 0 && d_v_vt <= d_vt_w) {
+            ecc_hat_v = std::max(e_prime, ecc_Ns_w.at(vt_v));
+        } else {
+            ecc_hat_v = std::max(e_prime, minEccS);
+        }
+        res.ecc_hat[v] = ecc_hat_v;
+    }
+
+    // ── Step 7: Diameter estimate ─────────────────────────────────────
     res.diameter_estimate = *std::max_element(res.ecc_hat.begin(), res.ecc_hat.end());
 
     return res;

@@ -3,109 +3,94 @@
 #include "graph.hpp"
 #include <random>
 #include <numeric>
-#include <functional>
+#include <algorithm>
 
 /**
- * k-BFS Eccentricity Bounding Algorithm
+ * k-BFS Eccentricity Estimation Algorithm
+ * As described in: "Parallel Algorithms for Eccentricity Computation" (Shun et al.)
  *
- * Performs k BFS traversals from selected source vertices to compute
- * lower and upper bounds on eccentricity for every vertex.
+ * Phase 1:
+ *   - Sample k random source vertices S.
+ *   - Run BFS from each s in S.
+ *   - d(v, S) = max_{s in S} d(v, s)  (the highest BFS level that visits v).
  *
- * For each vertex v:
- *   Lower bound: eL(v) = max_{s in S} d(s, v)
- *   Upper bound: eU(v) = min_{s in S} (ecc(s) + d(s, v))
+ * Phase 2:
+ *   - S' = k vertices with the largest d(v, S) values.
+ *   - Run BFS from each vertex in S'.
+ *   - d(v, S') = max_{s' in S'} d(v, s')
  *
- * Diameter estimate = max_v eL(v)
+ * Final estimate:
+ *   ê(v) = max(d(v, S), d(v, S'))
  *
- * Source selection strategies:
- *   RANDOM       - pick k random vertices
- *   HIGH_DEGREE  - pick k highest-degree vertices
- *   ITERATIVE    - greedily pick vertex with largest bound gap
+ * The diameter estimate is max_v ê(v).
+ *
+ * Total work: O(2km)   (k BFS's each phase)
  */
 
-enum class KBFSStrategy {
-    RANDOM,
-    HIGH_DEGREE,
-    ITERATIVE
-};
-
 struct KBFSResult {
-    int diameter_lower;      // max lower bound = estimated diameter
-    int diameter_upper;      // max upper bound
-    int num_bfs;             // total BFS calls performed
-    std::vector<int> ecc_lower;
-    std::vector<int> ecc_upper;
+    int diameter_estimate;   // max_v ê(v)
+    int num_bfs;             // total number of BFS calls (= 2k)
+    std::vector<int> ecc_hat; // ê(v) for each vertex v
+    std::vector<int> dS;      // d(v, S): max distance to Phase-1 sources (after phase 1)
 };
 
-inline KBFSResult kbfs_diameter(const Graph& g, int k, KBFSStrategy strategy = KBFSStrategy::RANDOM, unsigned seed = 42) {
+/**
+ * @param g   Connected undirected unweighted graph (use largest_component() first)
+ * @param k   Number of BFS sources per phase
+ * @param seed Random seed for source selection
+ */
+inline KBFSResult kbfs_diameter(const Graph& g, int k, unsigned seed = 42) {
     KBFSResult res;
-    res.ecc_lower.assign(g.n, 0);
-    res.ecc_upper.assign(g.n, std::numeric_limits<int>::max());
+    int n = g.n;
+    res.dS.assign(n, 0);
+    res.ecc_hat.assign(n, 0);
     res.num_bfs = 0;
 
     std::mt19937 rng(seed);
 
-    // Helper: perform BFS from source and update bounds
-    auto do_bfs = [&](int source) {
-        auto dist = g.bfs(source);
+    // ── Phase 1: Sample k random sources S ──────────────────────────
+    int k1 = std::min(k, n);
+    std::vector<int> perm(n);
+    std::iota(perm.begin(), perm.end(), 0);
+    std::shuffle(perm.begin(), perm.end(), rng);
+    std::vector<int> S(perm.begin(), perm.begin() + k1);
+
+    // BFS from each s in S; d(v, S) = max level that visits v
+    for (int s : S) {
+        auto dist = g.bfs(s);
         res.num_bfs++;
-
-        // Eccentricity of the source = max distance from source
-        int ecc_s = *std::max_element(dist.begin(), dist.end());
-
-        for (int v = 0; v < g.n; v++) {
-            if (dist[v] < 0) continue; // unreachable
-            res.ecc_lower[v] = std::max(res.ecc_lower[v], dist[v]);
-            res.ecc_upper[v] = std::min(res.ecc_upper[v], ecc_s + dist[v]);
-        }
-    };
-
-    if (strategy == KBFSStrategy::RANDOM) {
-        // Pick k random distinct vertices
-        std::vector<int> perm(g.n);
-        std::iota(perm.begin(), perm.end(), 0);
-        std::shuffle(perm.begin(), perm.end(), rng);
-        int actual_k = std::min(k, g.n);
-        for (int i = 0; i < actual_k; i++) {
-            do_bfs(perm[i]);
-        }
-    }
-    else if (strategy == KBFSStrategy::HIGH_DEGREE) {
-        // Pick k highest-degree vertices
-        std::vector<int> order(g.n);
-        std::iota(order.begin(), order.end(), 0);
-        std::sort(order.begin(), order.end(), [&](int a, int b) {
-            return g.adj[a].size() > g.adj[b].size();
-        });
-        int actual_k = std::min(k, g.n);
-        for (int i = 0; i < actual_k; i++) {
-            do_bfs(order[i]);
-        }
-    }
-    else if (strategy == KBFSStrategy::ITERATIVE) {
-        // First source: random
-        {
-            int s = rng() % g.n;
-            do_bfs(s);
-        }
-        // Remaining k-1 sources: pick vertex with largest gap (eU - eL)
-        for (int step = 1; step < k && step < g.n; step++) {
-            int best = -1, best_gap = -1;
-            for (int v = 0; v < g.n; v++) {
-                int gap = res.ecc_upper[v] - res.ecc_lower[v];
-                if (gap > best_gap) {
-                    best_gap = gap;
-                    best = v;
-                }
-            }
-            if (best < 0 || best_gap == 0) break; // all exact
-            do_bfs(best);
+        for (int v = 0; v < n; v++) {
+            if (dist[v] > res.dS[v])
+                res.dS[v] = dist[v];
         }
     }
 
-    // Compute diameter bounds
-    res.diameter_lower = *std::max_element(res.ecc_lower.begin(), res.ecc_lower.end());
-    res.diameter_upper = *std::max_element(res.ecc_upper.begin(), res.ecc_upper.end());
+    // ── Phase 2: S' = k vertices with largest d(v, S) ───────────────
+    // Sort by d(v,S) descending, take top k
+    std::vector<int> order(n);
+    std::iota(order.begin(), order.end(), 0);
+    std::partial_sort(order.begin(), order.begin() + k1, order.end(),
+                      [&](int a, int b) { return res.dS[a] > res.dS[b]; });
+    std::vector<int> Sp(order.begin(), order.begin() + k1);
+
+    // BFS from each s' in S'; d(v, S') = max level
+    std::vector<int> dSp(n, 0);
+    for (int sp : Sp) {
+        auto dist = g.bfs(sp);
+        res.num_bfs++;
+        for (int v = 0; v < n; v++) {
+            if (dist[v] > dSp[v])
+                dSp[v] = dist[v];
+        }
+    }
+
+    // ── Final estimate: ê(v) = max(d(v,S), d(v,S')) ─────────────────
+    res.diameter_estimate = 0;
+    for (int v = 0; v < n; v++) {
+        res.ecc_hat[v] = std::max(res.dS[v], dSp[v]);
+        if (res.ecc_hat[v] > res.diameter_estimate)
+            res.diameter_estimate = res.ecc_hat[v];
+    }
 
     return res;
 }
