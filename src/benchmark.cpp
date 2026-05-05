@@ -11,8 +11,19 @@
 #include <string>
 #include <vector>
 #include <cstring>
+#include <unordered_map>
 
 namespace fs = std::filesystem;
+
+// Ground truth diameters from Shun et al. (Table 1)
+const std::unordered_map<std::string, int> known_diameters = {
+    {"CA-CondMat", 14},
+    {"CA-HepTh", 17},
+    {"Email-Enron", 11},
+    {"email-Eu-core", 7},
+    {"facebook_combined", 8},
+    {"Wiki-Vote", 7}
+};
 
 // ─── Timing helper ──────────────────────────────────────────────────
 struct Timer {
@@ -78,8 +89,15 @@ void benchmark_graph(const std::string& path, CSVWriter& csv, bool run_naive, bo
     Timer timer;
     int true_diam = -1;
 
-    // ── Naive (exact) ───────────────────────────────────────────────
-    if (run_naive) {
+    // ── Naive (exact) or Ground Truth ───────────────────────────────
+    if (known_diameters.count(name)) {
+        true_diam = known_diameters.at(name);
+        if (verbose) std::cout << "  [Ground Truth] Known Diameter = " << true_diam << "\n";
+        
+        // Log it to CSV so it acts as the baseline
+        csv.write_row(name, g.n, g.m, "Exact (Known)", "-", "-",
+                      true_diam, true_diam, 0, 0.0);
+    } else if (run_naive) {
         if (verbose) std::cout << "  Running Naive (all-pairs BFS)...\n";
         timer.begin();
         auto naive_res = naive_diameter(g);
@@ -90,12 +108,14 @@ void benchmark_graph(const std::string& path, CSVWriter& csv, bool run_naive, bo
                                << "  Time = " << t << " ms\n";
         csv.write_row(name, g.n, g.m, "Naive", "n", "-",
                       true_diam, true_diam, naive_res.num_bfs, t);
+    } else {
+        if (verbose) std::cout << "  Skipping Naive computation.\n";
     }
 
     // ── k-BFS (two-phase: S random → S' = k farthest from S) ──────────
     // As per paper: Phase 1 picks k random sources S, Phase 2 picks S' = k vertices
-    // with largest d(v,S). ê(v) = max(d(v,S), d(v,S')). No strategy enum needed.
-    std::vector<int> k_values = {1, 3, 5, 10, 20};
+    // with largest d(v,S). ê(v) = max(d(v,S), d(v,S')).
+    std::vector<int> k_values = {1, 2, 4, 8, 16, 32, 64};
 
     for (int k : k_values) {
         if (k > g.n) continue;
@@ -189,11 +209,6 @@ bool run_verification() {
     check("K5", Graph::from_edges(5, {{0,1},{0,2},{0,3},{0,4},{1,2},{1,3},{1,4},{2,3},{2,4},{3,4}}), 1);
 
     // Binary tree depth 3: 7 nodes, diameter = 4
-    //       0
-    //      / \
-    //     1   2
-    //    / \ / \
-    //   3  4 5  6
     check("BinTree(7)", Graph::from_edges(7, {{0,1},{0,2},{1,3},{1,4},{2,5},{2,6}}), 4);
 
     // Larger path (10 nodes, diameter = 9)
@@ -303,7 +318,6 @@ int main(int argc, char** argv) {
 
     for (auto& gf : graph_files) {
         // Determine if we should run naive
-        // Quick peek at graph size
         Graph peek = Graph::load(gf);
         Graph lcc = peek.largest_component();
         bool do_naive = !force_no_naive && (lcc.n <= naive_limit);

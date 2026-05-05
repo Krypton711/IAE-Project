@@ -1,51 +1,44 @@
-# Walkthrough: k-BFS vs RV Diameter Comparison
+# Parallel Graph Eccentricity Estimation Benchmark
 
-## What Was Built
+This project benchmarks parallel graph eccentricity and diameter estimation algorithms, specifically comparing an optimized k-BFS approach against the theoretical RV algorithm (Roditty and Vassilevska Williams).
 
-A C++ benchmarking framework to compare **k-BFS** and **RV** algorithms for graph diameter computation.
+## File Structure
 
-### Files Created
+The project expects the following directory layout:
+\`\`\`
+.
+├── src/
+│   ├── benchmark.cpp      # Main execution script; handles IO, timing, and CSV generation.
+│   ├── graph.hpp          # Adjacency list graph representation with SNAP edge-list parsing.
+│   ├── kbfs.hpp           # Optimized k-BFS implementation using 64-bit vector parallelism.
+│   ├── rv.hpp             # Sequential implementation of the RV eccentricity algorithm.
+│   └── naive.hpp          # Exact all-pairs BFS algorithm (used only for small verification graphs).
+└── datasets/              # Directory containing the unweighted, undirected SNAP graph files (.txt).
+\`\`\`
 
-| File | Purpose |
-|------|---------|
-| [graph.hpp](file:///home/karthik-sundram/Documents/IAE-Project/src/graph.hpp) | Graph data structure (adjacency list, BFS, SNAP loader, LCC extraction) |
-| [naive.hpp](file:///home/karthik-sundram/Documents/IAE-Project/src/naive.hpp) | Exact all-pairs BFS for ground truth |
-| [kbfs.hpp](file:///home/karthik-sundram/Documents/IAE-Project/src/kbfs.hpp) | k-BFS with 3 strategies (random, high-degree, iterative) |
-| [rv.hpp](file:///home/karthik-sundram/Documents/IAE-Project/src/rv.hpp) | Roditty-Vassilevska Williams 3/2-approximation |
-| [benchmark.cpp](file:///home/karthik-sundram/Documents/IAE-Project/src/benchmark.cpp) | Main benchmarker with CSV output and verification mode |
-| [Makefile](file:///home/karthik-sundram/Documents/IAE-Project/Makefile) | Build system |
-| [datasets/README.md](file:///home/karthik-sundram/Documents/IAE-Project/datasets/README.md) | Dataset sources (SNAP, NetworkRepository, KONECT, DIMACS) with download commands |
+## How to Compile and Run
 
-## Verification Results
+### 1. Compilation
+The algorithms utilize `std::atomic` and modern C++ features. Compile the source using C++17 and the highest optimization flag (`-O3`):
 
-All 6 test cases **PASSED**:
+\`\`\`bash
+g++ -std=c++17 -O3 src/benchmark.cpp -o benchmark
+\`\`\`
 
-```
-Testing Path(5)   → Naive=4, k-BFS bounds bracket ✓, RV=4 ✓
-Testing Cycle(5)  → Naive=2, k-BFS bounds bracket ✓, RV=2 ✓
-Testing Star(5)   → Naive=2, k-BFS bounds bracket ✓, RV=2 ✓
-Testing K5        → Naive=1, k-BFS bounds bracket ✓, RV=1 ✓
-Testing BinTree(7)→ Naive=4, k-BFS bounds bracket ✓, RV=4 ✓
-Testing Path(10)  → Naive=9, k-BFS bounds bracket ✓, RV=9 ✓
-```
+*(Note: On Windows using MSVC, use `cl /EHsc /O2 /std:c++17 src\benchmark.cpp`)*
 
-## Quick Start
+### 2. Verification Step
+Before running large datasets, verify that the core algorithms compute correct bounds on small, known graph topologies (Path, Cycle, Star, K5, Binary Tree):
 
-```bash
-# Build
-make
+\`\`\`bash
+./benchmark --verify
+\`\`\`
 
-# Verify correctness
-./build/benchmark --verify
+### 3. Full Benchmark Execution
+Run the benchmark across all graphs in the `datasets/` folder. We use the `--no-naive` flag to skip the exhaustive $O(mn)$ exact calculation, relying instead on a hardcoded ground-truth dictionary for accuracy metrics.
 
-# Benchmark on datasets
-./build/benchmark datasets/          # all files in directory
-./build/benchmark graph.txt          # single file
-./build/benchmark --no-naive graph.txt  # skip exact computation
+\`\`\`bash
+./benchmark --no-naive --output results/final_benchmark.csv datasets/
+\`\`\`
 
-# Output goes to results/benchmark.csv
-```
-
-## CSV Output Columns
-
-`graph, nodes, edges, algorithm, parameter, strategy, estimated_diameter, true_diameter, approx_ratio, num_bfs, time_ms`
+Once execution is complete, the results, including approximation ratios and BFS call counts, will be available in `results/final_benchmark.csv`.
