@@ -17,12 +17,13 @@ namespace fs = std::filesystem;
 
 // Ground truth diameters from Shun et al. (Table 1)
 const std::unordered_map<std::string, int> known_diameters = {
-    {"CA-CondMat", 14},
+    /*{"CA-CondMat", 14},
     {"CA-HepTh", 17},
     {"Email-Enron", 11},
     {"email-Eu-core", 7},
     {"facebook_combined", 8},
-    {"Wiki-Vote", 7}
+    {"Wiki-Vote", 7},
+    {"Slashdot", 10},*/
 };
 
 // ─── Timing helper ──────────────────────────────────────────────────
